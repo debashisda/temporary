@@ -1,0 +1,349 @@
+(function () {
+  const e = React.createElement;
+
+  function DocumentUploadComponent(props) {
+    const [documents, setDocuments] = React.useState([]);
+
+    const iluUrl = props.iluUrl;
+    const environment = props.environment;
+    const authToken = props.authToken;
+    const caseID = props.caseID;
+
+    function waitForPega(callback) {
+      if (window.pega && pega.api && pega.api.ui && pega.api.ui.actions) {
+        callback(pega.api.ui.actions);
+      } else {
+        console.log('Waiting for Pega API...');
+
+        setTimeout(function () {
+          waitForPega(callback);
+        }, 500);
+      }
+    }
+
+    React.useEffect(function () {
+      const rows = (props.documents || [])
+        .filter(function (item) {
+          return String(item.isVisible).toLowerCase() === 'true';
+        })
+        .map(function (item, index) {
+          const isInitialCall = String(item.isInitialCall).toLowerCase() === 'true';
+
+          let status;
+          let uploadEnabled;
+
+          if (isInitialCall) {
+            status = 'UPLOADING';
+            uploadEnabled = false;
+          } else {
+            status = item.status || 'UNKNOWN';
+            uploadEnabled = status === 'false' || status === 'false';
+          }
+
+          return {
+            id: index + 1,
+            documentName: item.documentName || `Document_${index + 1}`,
+            isInitialCall: item.isInitialCall,
+            isVisible: item.isVisible,
+            documentID: item.documentID,
+            pxListSubscript: item.pxListSubscript,
+            status,
+            uploadEnabled
+          };
+        });
+
+      setDocuments(rows);
+
+      rows.forEach(function (row) {
+        const isInitialCall = String(row.isInitialCall).toLowerCase() === 'true';
+
+        if (isInitialCall) {
+          uploadDocument(row);
+        }
+      });
+    }, []);
+
+    function updateDocumentListActivity(rowId, apiResponseStatus, apiResponseMessage) {
+      waitForPega(function (actions) {
+        actions.runActivity({
+          name: 'UpdateDocumentList',
+          parameters: [
+            {
+              name: 'RowID',
+              value: rowId,
+              isProperty: false
+            },
+            {
+              name: 'APIResponceStatus',
+              value: apiResponseStatus,
+              isProperty: false
+            },
+            {
+              name: 'APIResponceMessage',
+              value: apiResponseMessage || '',
+              isProperty: false
+            }
+          ],
+          contextPage: 'pyWorkPage'
+        });
+  
+  actions.runActivity({
+          name: 'SaveCommit',
+          parameters: [
+            {
+              name: 'Save',
+              value: 'true',
+              isProperty: false
+            },
+            {
+              name: 'Commit',
+              value: 'true',
+              isProperty: false
+            }
+          ],
+          contextPage: 'pyWorkPage'
+        });
+      });
+    }
+
+    function getDocumentData(row, successCallback, errorCallback) {
+      waitForPega(function (actions) {
+        var options = {
+          name: 'D_GeneratDocumentRequest',
+          parameters: [
+            { name: 'DocumentID', value: row.documentID, isProperty: false },
+            { name: 'CaseID', value: caseID, isProperty: false }
+          ],
+          callback: callbackFunc
+        };
+
+        function callbackFunc(data) {
+          try {
+            console.log('D_GeneratDocumentRequest', data);
+
+            var result =
+              data && data.pxResults && data.pxResults.length > 0 ? data.pxResults[0] : null;
+
+            if (!result) {
+              throw new Error('Data page returned no results');
+            }
+
+            var metadataString = result.metadata;
+            var attachments = result.attachments;
+
+            if (!metadataString) {
+              throw new Error('Metadata payload not returned');
+            }
+
+            if (!attachments) {
+              throw new Error('Attachment payload not returned');
+            }
+
+            successCallback({
+              metadata: JSON.parse(metadataString),
+              attachments
+            });
+          } catch (e) {
+            console.error('Unable to load document data', e);
+
+            if (errorCallback) {
+              errorCallback(e);
+            }
+          }
+        }
+
+        actions.getDataPage(options);
+      });
+    }
+
+    function uploadDocument(row) {
+      setTimeout(function () {
+        console.log("Executed after 2 seconds");
+      }, 2000);
+      getDocumentData(
+        row,
+        function (documentData) {
+          const formData = new FormData();
+          formData.append('metadata', JSON.stringify(documentData.metadata));
+
+          formData.append('attachments', documentData.attachments);
+
+          const headers = {};
+
+          if (environment && environment.toUpperCase() !== 'PRODUCTION') {
+            headers.Authorization = authToken;
+          }
+
+          axios
+            .post(iluUrl, formData, {
+              headers
+            })
+            .then(function (response) {
+              console.log('ILU Success', response);
+
+              if (response.status === 201) {
+                updateRow(row.documentName, 'true', false);
+
+                updateDocumentListActivity(row.pxListSubscript, 'true', '');
+                
+              } else {
+                const message =
+                  (response.data && response.data.details) ||
+                  (response.data && response.data.message) ||
+                  'Unexpected response from ILU';
+
+                updateRow(row.documentName, 'false', true);
+
+                updateDocumentListActivity(row.pxListSubscript, 'false', message);
+              }
+            })
+            .catch(function (error) {
+              console.error('ILU Error', error);
+
+              const errorResponse = error.response && error.response.data;
+
+              const apiResponseMessage =
+                (errorResponse && errorResponse.details) ||
+                (errorResponse && errorResponse.message) ||
+                error.message ||
+                'Unknown error';
+
+              updateRow(row.documentName, 'false', true);
+
+              updateDocumentListActivity(row.pxListSubscript, 'false', apiResponseMessage);
+            });
+        },
+        function (error) {
+          const message = (error && error.message) || 'Unable to generate metadata';
+
+          updateRow(row.documentName, 'false', true);
+          updateDocumentListActivity(row.pxListSubscript, 'false', message);
+        }
+      );
+    }
+
+    function updateRow(fileName, status, uploadEnabled) {
+      setDocuments(function (previousRows) {
+        return previousRows.map(function (item) {
+          if (item.documentName === fileName) {
+            return {
+              ...item,
+              status,
+              uploadEnabled
+            };
+          }
+
+          return item;
+        });
+      });
+    }
+
+    function regenerateDocument(row) {
+      updateRow(row.documentName, 'UPLOADING', false);
+      uploadDocument(row);
+    }
+
+    function renderStatus(status) {
+      if (String(status).toLowerCase() === 'true') {
+        return e('img', {
+          src: 'webwb/pztick_13248681196.png!!.png',
+          alt: 'True',
+          className: 'checkbox chkBxCtl',
+          title: 'Success'
+        });
+      }
+
+      if (String(status).toLowerCase() === 'false') {
+        return e('img', {
+          src: 'dsmimages/pzerror_modifier_13720334832.png!!.png',
+          alt: 'False',
+          className: 'checkbox chkBxCtl',
+          title: 'Failed'
+        });
+      }
+
+      return e(
+        'span',
+        {
+          title: 'Uploading',
+          style: {
+            color: '#005EA5',
+            fontSize: '14px',
+            fontWeight: '600'
+          }
+        },
+        'Uploading...'
+      );
+    }
+
+    return e(
+      'div',
+      {
+        style: {
+          padding: '0'
+        }
+      },
+      e(
+        'table',
+        {
+          style: {
+            width: '100%',
+            borderCollapse: 'collapse'
+          }
+        },
+        [
+          e(
+            'thead',
+            {
+              key: 'thead'
+            },
+            e('tr', {}, [
+              e('th', { style: { textAlign: 'left' } }, 'Document name'),
+              e('th', { style: { textAlign: 'left' } }, 'Status'),
+              e('th', { style: { textAlign: 'left' } }, '')
+            ])
+          ),
+          e(
+            'tbody',
+            {
+              key: 'tbody'
+            },
+            documents.map(function (row) {
+              return e(
+                'tr',
+                {
+                  key: row.id
+                },
+                [
+                  e('td', { key: 'name' }, row.documentName),
+                  e('td', { key: 'status' }, renderStatus(row.status)),
+                  e(
+                    'td',
+                    {
+                      key: 'button'
+                    },
+                    e(
+                      'button',
+                      {
+                        title: 'Generate Document',
+                        disabled: !row.uploadEnabled,
+                        onClick() {
+                          regenerateDocument(row);
+                        }
+                      },
+                      'Generate Document'
+                    )
+                  )
+                ]
+              );
+            })
+          )
+        ]
+      )
+    );
+  }
+
+  window.DocumentUploadComponent = DocumentUploadComponent;
+})();
+// static-content-hash-trigger-GCC
+//static-content-hash-trigger-GCC
