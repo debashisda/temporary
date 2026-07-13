@@ -1,0 +1,266 @@
+(function () {
+	const e = React.createElement;
+
+	function GenerateDocument(props) {
+    const [documents, setDocuments] = React.useState([]);
+    const documentsRef = React.useRef([]);
+    
+    const iluUrl = props.iluUrl;
+    const environment = props.environment;
+    const authToken = props.authToken;
+    const caseID = props.caseID;
+    
+    React.useEffect(function () {
+      documentsRef.current = documents;
+    },[documents]);
+  
+    React.useEffect(function () {
+      const rows = (props.documents || [])
+        .filter(function (item) {
+          return String(item.FromGenerateDoc).toLowerCase() === 'true' &&
+            String(item.status).toLowerCase() !== 'true';
+        })
+        .map(function (item, index) {
+          return {
+            id: index + 1,
+            documentName: item.documentName || `Document_${index + 1}`,
+            documentID: item.documentID,
+            LinkedCaseKey:item.LinkedCaseKey,
+            pxListSubscript: item.pxListSubscript,
+            status: item.status
+          };
+        });
+
+      setDocuments(rows);
+      documentsRef.current = rows;
+    }, []);
+    
+    function waitForPega(callback) {
+      if (window.pega && pega.api && pega.api.ui && pega.api.ui.actions) {
+        callback(pega.api.ui.actions);
+      } else {
+        console.log('Waiting for Pega API...');
+
+        setTimeout(function () {
+          waitForPega(callback);
+        }, 500);
+      }
+    }
+ 
+    function getDocumentData(row, successCallback, errorCallback) {
+      waitForPega(function (actions) {
+        var options = {
+          name: 'D_GeneratDocumentRequest',
+          parameters: [
+            { name: 'DocumentID', value: row.documentID, isProperty: false },
+            { name: 'CaseID', value: caseID, isProperty: false },
+            { name: 'Key', value: row.LinkedCaseKey, isProperty: false }
+          ],
+          callback: callbackFunc
+        };
+
+        function callbackFunc(data) {
+          try {
+            console.log('D_GeneratDocumentRequest', data);
+
+            var result =
+              data && data.pxResults && data.pxResults.length > 0 ? data.pxResults[0] : null;
+console.log(' result.metadata',  result.metadata);
+            console.log(' result.attachments',  result.attachments);
+            if (!result) {
+              throw new Error('Data page returned no results');
+            }
+
+            var metadataString = result.metadata;
+            var attachments = result.attachments;
+
+            if (!metadataString) {
+              throw new Error('Metadata payload not returned');
+            }
+
+            if (!attachments) {
+              throw new Error('Attachment payload not returned');
+            }
+
+            successCallback({
+              metadata: JSON.parse(metadataString),
+              attachments
+            });
+          } catch (e) {
+            console.error('Unable to load document data', e);
+
+            if (errorCallback) {
+              errorCallback(e);
+            }
+          }
+        }
+
+        actions.getDataPage(options);
+      });
+    }
+
+    function updateRow(fileName, status, uploadEnabled) {
+      setDocuments(function (previousRows) {
+        const updated =  previousRows.map(function (item) {
+          if (item.documentName === fileName) {
+            return {
+              ...item,
+              status,
+              uploadEnabled
+            };
+          }
+
+          return item;
+        });
+        documentsRef.current = updated;
+        return updated;
+      });
+    }
+    
+        function updateDocumentListActivity(rowId, apiResponseStatus, apiResponseMessage) {
+          console.log('apiResponseStatus', apiResponseStatus);
+          console.log('apiResponseMessage', apiResponseMessage);
+      waitForPega(function (actions) {
+        actions.runActivity({
+          name: 'UpdateDocumentList',
+          parameters: [
+            {
+              name: 'RowID',
+              value: rowId,
+              isProperty: false
+            },
+            {
+              name: 'APIResponceStatus',
+              value: apiResponseStatus,
+              isProperty: false
+            },
+            {
+              name: 'APIResponceMessage',
+              value: apiResponseMessage || '',
+              isProperty: false
+            }
+          ],
+          contextPage: 'pyWorkPage'
+        });
+		
+		actions.runActivity({
+          name: 'SaveCommit',
+          parameters: [
+            {
+              name: 'Save',
+              value: 'true',
+              isProperty: false
+            },
+            {
+              name: 'Commit',
+              value: 'true',
+              isProperty: false
+            }
+          ],
+          contextPage: 'pyWorkPage'
+        });
+      });
+    }
+
+    function uploadDocument(row) {
+      setTimeout(function () {
+        console.log("Executed after 2 seconds");
+      }, 2000);
+      getDocumentData(
+        row,
+        function (documentData) {
+          const formData = new FormData();
+          formData.append('metadata', JSON.stringify(documentData.metadata));
+
+          formData.append('attachments', documentData.attachments);
+
+          const headers = {};
+
+          if (environment && environment.toUpperCase() !== 'PRODUCTION') {
+            headers.Authorization = authToken;
+          }
+console.log('in uploadDocument iluUrl', iluUrl);
+          console.log('in uploadDocument formData', formData);
+          axios
+            .post(iluUrl, formData, {
+              headers
+            })
+            .then(function (response) {
+              console.log('ILU Success', response);
+
+              if (response.status === 201) {
+                updateRow(row.documentName, 'true', false);
+
+                updateDocumentListActivity(row.pxListSubscript, 'true', '');
+                
+              } else {
+                const message =
+                  (response.data && response.data.details) ||
+                  (response.data && response.data.message) ||
+                  'Unexpected response from ILU';
+ console.log('ILU Fail', response);
+
+                updateRow(row.documentName, 'false', true);
+
+                updateDocumentListActivity(row.pxListSubscript, 'false', message);
+              }
+            })
+            .catch(function (error) {
+              console.error('ILU Error', error);
+
+              const errorResponse = error.response && error.response.data;
+
+              const apiResponseMessage =
+                (errorResponse && errorResponse.details) ||
+                (errorResponse && errorResponse.message) ||
+                error.message ||
+                'Unknown error';
+
+              updateRow(row.documentName, 'false', true);
+
+              updateDocumentListActivity(row.pxListSubscript, 'false', apiResponseMessage);
+            });
+        },
+        function (error) {
+          const message = (error && error.message) || 'Unable to generate metadata';
+
+          updateRow(row.documentName, 'false', true);
+          updateDocumentListActivity(row.pxListSubscript, 'false', message);
+        }
+      );
+    }
+
+     function regenerateDocument(){
+       console.log('documentsRef.current', documentsRef.current);
+         documentsRef.current.forEach(function (document) {
+           console.log('regenerateDocument', document);
+          uploadDocument(document);
+        });
+     }
+ 
+		// HTML code to render button
+		return e(
+      'div',
+			{
+				style: {
+					padding: "0",
+				},
+			},
+			e(
+				"button",
+				{
+					title: "Generate Document",
+					disabled: false,
+          onClick: function (event) {
+      event.preventDefault();
+      event.stopPropagation();
+      regenerateDocument();
+    },
+				},
+				"Generate Document",
+			),
+		);
+	}
+	window.GenerateDocument = GenerateDocument;
+})();
+//static-content-hash-trigger-GCC
