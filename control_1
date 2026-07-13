@@ -1,0 +1,89 @@
+<%
+String ILUURL = pega_rules_utilities.getDataSystemSetting("HMRCContent", "IngestDocumentURL");
+String Environment = pega_rules_utilities.getDataSystemSetting("HMRC", "EnvironmentLevel");
+String AuthToken = pega_rules_utilities.getDataSystemSetting("HMRCContent", "IngestDocumentAuth");
+%>
+
+<input type="hidden" id="ILUURL" value="<%= ILUURL %>" />
+<input type="hidden" id="Environment" value="<%= Environment %>" />
+<input type="hidden" id="AuthToken" value="<%= AuthToken %>" />
+
+<pega:onlyonce name="pega_ui_react">
+    <pega:static type="script" app="webwb">
+        <pega:bundle name="pzpega_ui_react" />
+    </pega:static>
+</pega:onlyonce>
+
+<pega:onlyonce name="DocumentumBundle">
+    <pega:static type="script" app="webwb">
+        <pega:bundle name="DocumentumBundle" />
+    </pega:static>
+</pega:onlyonce>
+
+<pega:onlyonce name="GenerateDocument">
+    <pega:static type="script" app="webwb">
+        <pega:file name="GenerateDocument.js"/>
+    </pega:static>
+</pega:onlyonce>
+
+<pega:static type="style" app="webwb">
+  <pega:file name="DCTMStylesheet.css"/>
+</pega:static>
+
+<div id="GenerateDocumentContainer"></div>
+
+<script>
+var ILUURL = document.getElementById("ILUURL").value;
+var Environment = document.getElementById("Environment").value;
+var AuthToken = document.getElementById("AuthToken").value;
+var caseID = '<p:r n="pyWorkPage.pyID"/>';
+
+window.documentList = [];
+</script>
+
+<pega:forEach name="pyWorkPage.DocumentList">
+	<script>
+		window.documentList.push({
+			documentName: '<p:r n="$this.DocumentName"/>',
+			isInitialCall: '<p:r n="$this.IsInitialCall"/>',
+			status: '<p:r n="$this.Status"/>',
+			isVisible: '<p:r n="$this.IsVisible"/>',
+			documentID: '<p:r n="$this.DocumentID"/>',
+			pxListSubscript: '<p:r n="$this.pxListSubscript"/>',
+			attachments: '<p:r n="$this.attachments"/>',
+      LinkedCaseKey: '<p:r n="$this.LinkedCaseKey"/>',
+      FromGenerateDoc: '<p:r n="$this.FromGenerateDoc"/>',
+		});
+	</script>
+</pega:forEach>
+
+<script>
+
+console.log("Swapnil Document List:", window.documentList);
+
+if (
+    typeof React !== "undefined" &&
+    typeof ReactDOM !== "undefined"
+) {
+
+    ReactDOM.render(
+        React.createElement(
+            GenerateDocument,
+            {
+                iluUrl: ILUURL,
+                environment: Environment,
+                authToken: AuthToken,
+                caseID: caseID,
+                documents: window.documentList
+            }
+        ),
+        document.getElementById("GenerateDocumentContainer")
+    );
+}
+else {
+
+    console.error("React Component not rendered");
+
+}
+
+</script>
